@@ -16,7 +16,7 @@ use agentic_core::types::messages::ReasoningEffortLevel;
 use super::super::common::convert_response;
 use crate::app::AppState;
 use crate::model_capabilities::{
-    DEFAULT_REASONING_LEVELS, InputModalities, ModelCapabilities, UpstreamCapabilities, reasoning_level_description,
+    CodexReasoningLevel, DEFAULT_REASONING_LEVELS, InputModalities, ModelCapabilities, UpstreamCapabilities,
 };
 
 /// One model entry of an upstream OpenAI-compatible `/v1/models` payload.
@@ -58,21 +58,8 @@ struct UpstreamModelId {
 }
 
 /// Describe `levels` in the order the catalog lists them.
-fn supported_reasoning_levels(levels: &[ReasoningEffortLevel]) -> Vec<SupportedReasoningLevel> {
-    levels
-        .iter()
-        .map(|level| SupportedReasoningLevel {
-            effort: *level,
-            description: reasoning_level_description(*level),
-        })
-        .collect()
-}
-
-/// One selectable reasoning level with its Codex-facing description.
-#[derive(Debug, Serialize)]
-struct SupportedReasoningLevel {
-    effort: ReasoningEffortLevel,
-    description: &'static str,
+fn supported_reasoning_levels(levels: &[ReasoningEffortLevel]) -> Vec<CodexReasoningLevel> {
+    levels.iter().copied().map(CodexReasoningLevel::from_effort).collect()
 }
 
 /// How Codex truncates oversized tool output for a model.
@@ -105,7 +92,7 @@ struct CodexModelInfo {
     shell_type: &'static str,
     visibility: &'static str,
     base_instructions: &'static str,
-    supported_reasoning_levels: Vec<SupportedReasoningLevel>,
+    supported_reasoning_levels: Vec<CodexReasoningLevel>,
     supports_reasoning_summaries: bool,
     default_reasoning_summary: &'static str,
     support_verbosity: bool,

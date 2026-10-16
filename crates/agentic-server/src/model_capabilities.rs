@@ -8,6 +8,7 @@
 //! metadata the gateway recognizes, the local override table, and the resolution order between
 //! them.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use agentic_core::types::messages::ReasoningEffortLevel;
@@ -135,17 +136,6 @@ impl From<InputModalities> for Vec<Modality> {
     }
 }
 
-/// The wire representation of a reasoning effort level.
-const fn level_name(level: ReasoningEffortLevel) -> &'static str {
-    match level {
-        ReasoningEffortLevel::Low => "low",
-        ReasoningEffortLevel::Medium => "medium",
-        ReasoningEffortLevel::High => "high",
-        ReasoningEffortLevel::Xhigh => "xhigh",
-        ReasoningEffortLevel::Max => "max",
-    }
-}
-
 /// Rejected reasoning-level configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ReasoningLevelsError {
@@ -153,7 +143,7 @@ pub enum ReasoningLevelsError {
     #[error("supported_reasoning_levels must list at least one level; expected [\"low\", \"medium\", \"high\"]")]
     Empty,
     /// The list repeated a level.
-    #[error("supported_reasoning_levels lists \"{}\" more than once", level_name(*.0))]
+    #[error("supported_reasoning_levels lists \"{}\" more than once", .0.as_str())]
     Duplicate(ReasoningEffortLevel),
 }
 
@@ -322,7 +312,21 @@ pub struct CodexReasoningLevel {
     /// The effort the model accepts.
     pub effort: ReasoningEffortLevel,
     /// The Codex-facing description of the level.
-    pub description: String,
+    pub description: Cow<'static, str>,
+}
+
+impl CodexReasoningLevel {
+    /// Describe `effort` with the gateway's standard Codex-facing description.
+    ///
+    /// Used when a level comes from configuration or from the defaults. A description decoded
+    /// from a gateway catalog is kept as advertised instead.
+    #[must_use]
+    pub fn from_effort(effort: ReasoningEffortLevel) -> Self {
+        Self {
+            effort,
+            description: Cow::Borrowed(reasoning_level_description(effort)),
+        }
+    }
 }
 
 /// The Codex-facing description of a reasoning effort level.
@@ -342,10 +346,8 @@ pub const fn reasoning_level_description(level: ReasoningEffortLevel) -> &'stati
 pub fn default_codex_reasoning_levels() -> Vec<CodexReasoningLevel> {
     DEFAULT_REASONING_LEVELS
         .iter()
-        .map(|level| CodexReasoningLevel {
-            effort: *level,
-            description: reasoning_level_description(*level).to_owned(),
-        })
+        .copied()
+        .map(CodexReasoningLevel::from_effort)
         .collect()
 }
 
@@ -367,25 +369,35 @@ impl CodexModelCapabilities {
     /// A gateway older than `supported_reasoning_levels` keeps working: the launcher falls back
     /// to the default levels instead of writing a catalog without any.
     #[must_use]
-    pub fn reasoning_levels(&self) -> Vec<CodexReasoningLevel> {
+    pub fn reasoning_levels(&self) -> Cow<'_, [CodexReasoningLevel]> {
         if self.supported_reasoning_levels.is_empty() {
-            default_codex_reasoning_levels()
+            Cow::Owned(default_codex_reasoning_levels())
         } else {
-            self.supported_reasoning_levels.clone()
+            Cow::Borrowed(&self.supported_reasoning_levels)
         }
     }
 
     /// The level Codex starts on: `medium` when it is advertised, otherwise the first level.
     #[must_use]
     pub fn default_reasoning_level(&self) -> ReasoningEffortLevel {
-        let levels = self.reasoning_levels();
-        levels
-            .iter()
-            .map(|level| level.effort)
-            .find(|effort| *effort == ReasoningEffortLevel::Medium)
-            .or_else(|| levels.first().map(|level| level.effort))
-            .unwrap_or(ReasoningEffortLevel::Medium)
+        if self.supported_reasoning_levels.is_empty() {
+            first_or_medium(DEFAULT_REASONING_LEVELS.iter().copied())
+        } else {
+            first_or_medium(self.supported_reasoning_levels.iter().map(|level| level.effort))
+        }
     }
+}
+
+/// `medium` when it appears in `levels`, otherwise the first level, otherwise `medium`.
+fn first_or_medium(levels: impl Iterator<Item = ReasoningEffortLevel>) -> ReasoningEffortLevel {
+    let mut first = None;
+    for level in levels {
+        first.get_or_insert(level);
+        if level == ReasoningEffortLevel::Medium {
+            return level;
+        }
+    }
+    first.unwrap_or(ReasoningEffortLevel::Medium)
 }
 
 impl CodexCatalogCapabilities {

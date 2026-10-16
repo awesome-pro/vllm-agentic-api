@@ -510,11 +510,11 @@ mod tests {
             supported_reasoning_levels: vec![
                 CodexReasoningLevel {
                     effort: agentic_core::types::messages::ReasoningEffortLevel::Low,
-                    description: "Fast".to_owned(),
+                    description: "Fast".into(),
                 },
                 CodexReasoningLevel {
                     effort: agentic_core::types::messages::ReasoningEffortLevel::Max,
-                    description: "Deepest".to_owned(),
+                    description: "Deepest".into(),
                 },
             ],
         };
