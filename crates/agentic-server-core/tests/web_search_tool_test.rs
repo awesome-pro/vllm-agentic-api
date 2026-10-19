@@ -1467,16 +1467,11 @@ async fn builtin_tool_declarations_stay_public_in_streaming_lifecycle() {
         snapshots += 1;
         let context = event["type"].as_str().unwrap_or_default().to_owned();
         assert_public_tool_metadata(response, &public_tools, &context);
-        if context != "response.completed" {
-            // The gateway relaxes a forced selector to `auto` before the round that answers
-            // the tool result, so only the first-round snapshots report the submitted one.
-            // Which round is authoritative for a single public response is #434.
-            assert_eq!(
-                response["tool_choice"],
-                serde_json::json!("required"),
-                "the submitted selector must be reported: {context}"
-            );
-        }
+        assert_eq!(
+            response["tool_choice"],
+            serde_json::json!("required"),
+            "the submitted selector must be reported: {context}"
+        );
     }
     assert!(snapshots >= 2, "expected creation and terminal snapshots");
 
@@ -1536,7 +1531,9 @@ async fn builtin_tool_declarations_stay_public_in_json_and_stored_responses() {
         &public_tools,
         "terminal payload",
     );
+    assert_eq!(response.tool_choice, Some(ToolChoice::Required));
     let stored = exec_ctx.resp_handler.retrieve(&response.id).await.unwrap();
+    assert_eq!(stored.tool_choice, Some(ToolChoice::Required));
     assert_public_tool_metadata(
         &serde_json::to_value(&stored).unwrap(),
         &public_tools,

@@ -51,12 +51,12 @@ fn translation_context(registry: &ToolRegistry, agent: &AgentPipeline) -> Transl
             .filter(|state| state.is_active())
             .map(ToolSearchState::public_response_tools)
             .or_else(|| {
-                // The model server echoes its own tool declarations, and built-in tools are
-                // lowered to function schemas before inference. Always restore the public
-                // declarations the client submitted; internal schemas stay upstream-only.
+                // Use the resolved declarations, including inherited tools when the client
+                // omitted `tools`. Lowering creates separate UpstreamRequest schemas;
+                // response metadata sanitization removes private MCP discovery/auth fields.
                 agent.request.enriched_request.tools.clone()
             }),
-        agent.request.enriched_request.tool_choice.clone(),
+        agent.request.public_tool_choice().cloned(),
     )
     .with_request_fields(&agent.request.original_request)
 }
@@ -378,6 +378,9 @@ pub(super) mod tests {
         let public_tools = serde_json::to_value(&request.enriched_request.tools).unwrap();
         let registry = ToolRegistry::from_tool_types(std::collections::HashMap::new());
         let mut agent = AgentPipeline::new(request, None, StreamRelay::detached());
+        // Preserve an inherited selector before relaxing the inference request.
+        assert!(agent.request.original_request.tool_choice.is_none());
+        agent.request.relax_tool_choice();
         let stream_context = translation_context(&registry, &agent);
         let json_context = translation_context(&registry, &agent);
         drop(registry);
