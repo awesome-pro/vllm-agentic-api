@@ -1021,7 +1021,7 @@ impl OutputItem {
             Self::McpListTools(item) => item.agent.as_ref(),
             Self::Reasoning(item) => item.agent.as_ref(),
             Self::Compaction(item) => item.agent.as_ref(),
-            Self::Unknown => None,
+            Self::Unknown { .. } => None,
         }
     }
 
@@ -1042,7 +1042,7 @@ impl OutputItem {
             Self::McpListTools(item) => &mut item.agent,
             Self::Reasoning(item) => &mut item.agent,
             Self::Compaction(item) => &mut item.agent,
-            Self::Unknown => return,
+            Self::Unknown { .. } => return,
         };
         *slot = Some(agent);
     }
@@ -1065,7 +1065,7 @@ impl OutputItem {
             | Self::MultiAgentCall(_)
             | Self::MultiAgentCallOutput(_)
             | Self::AgentMessage(_)
-            | Self::Unknown => false,
+            | Self::Unknown { .. } => false,
         }
     }
 
@@ -1086,7 +1086,7 @@ impl OutputItem {
             | Self::MultiAgentCall(_)
             | Self::MultiAgentCallOutput(_)
             | Self::AgentMessage(_)
-            | Self::Unknown => false,
+            | Self::Unknown { .. } => false,
         }
     }
 
@@ -1113,7 +1113,7 @@ impl OutputItem {
             Self::MultiAgentCall(item) => Some(InputItem::MultiAgentCall(item.clone().into())),
             Self::MultiAgentCallOutput(item) => Some(InputItem::MultiAgentCallOutput(item.clone().into())),
             Self::AgentMessage(item) => Some(InputItem::AgentMessage(item.clone().into())),
-            Self::CodeInterpreterCall(_) | Self::WebSearchCall(_) | Self::McpCall(_) | Self::Unknown => None,
+            Self::CodeInterpreterCall(_) | Self::WebSearchCall(_) | Self::McpCall(_) | Self::Unknown { .. } => None,
         }
     }
 }
@@ -1866,8 +1866,10 @@ mod tests {
         assert!(matches!(item, OutputItem::Unknown));
 
         let unknown = serde_json::json!({"type": "new_item", "payload": {"a": 1}});
-        let item: InputItem = serde_json::from_value(unknown).unwrap();
-        assert!(matches!(item, InputItem::Unknown));
+        assert!(
+            serde_json::from_value::<InputItem>(unknown).is_err(),
+            "unmodeled input item types are rejected"
+        );
     }
 
     #[test]

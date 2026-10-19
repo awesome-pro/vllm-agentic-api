@@ -16,11 +16,13 @@ use serde_json::Value;
 
 use crate::types::event::MessageStatus;
 use crate::types::tools::{ResponsesTool, ToolSearchExecution, ToolSearchStatus};
-use crate::utils::common::deserialize_from_value;
 
 use super::code_interpreter::CodeInterpreterCall;
 use super::multi_agent::{AgentAttribution, InputAgentMessage, InputMultiAgentCall, InputMultiAgentCallOutput};
-use super::output::{CustomToolCall, FunctionToolCall, McpListTools, MessagePhase, ReasoningOutput, ToolSearchCall};
+use super::output::{
+    CustomToolCall, FunctionToolCall, McpCall, McpListTools, MessagePhase, ReasoningOutput, ToolSearchCall,
+    WebSearchCall,
+};
 use super::shell::{ShellCall, ShellCallOutputMessage, ShellCallStatus};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -287,7 +289,7 @@ impl From<CustomToolCallOutputMessage> for FunctionToolResultMessage {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum InputItem {
     #[serde(rename = "multi_agent_call")]
@@ -332,48 +334,44 @@ pub enum InputItem {
     /// Carries no payload; it is never forwarded to the upstream model.
     #[serde(rename = "compaction_trigger")]
     CompactionTrigger,
-    #[serde(other)]
-    Unknown,
+    /// A gateway-executed web search call replayed from a prior response.
+    #[serde(rename = "web_search_call")]
+    WebSearchCall(WebSearchCall),
+    /// A gateway-executed MCP call replayed from a prior response.
+    #[serde(rename = "mcp_call")]
+    McpCall(McpCall),
 }
 
-impl<'de> Deserialize<'de> for InputItem {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
+/// Fill the implicit `message` discriminator before the derived, tagged
+/// deserializer distinguishes an item's shape. Unsupported discriminators are
+/// left untouched, so they fail as unknown variants instead of becoming a
+/// message.
+fn with_default_type(mut value: Value) -> Value {
+    if let Value::Object(fields) = &mut value
+        && !fields.contains_key("type")
     {
-        let mut value = Value::deserialize(deserializer)?;
-        // Consume the enum discriminator before a flattened payload can retain it.
-        let kind = value.as_object_mut().and_then(|object| object.remove("type"));
-        let item = match kind.as_ref().and_then(Value::as_str) {
-            None | Some("message") => deserialize_from_value(value).map(Self::Message),
-            Some("function_call") => deserialize_from_value(value).map(Self::FunctionCall),
-            Some("code_interpreter_call") => deserialize_from_value(value).map(Self::CodeInterpreterCall),
-            Some("function_call_output") => deserialize_from_value(value).map(Self::FunctionCallOutput),
-            Some("tool_search_call") => deserialize_from_value(value).map(Self::ToolSearchCall),
-            Some("tool_search_output") => deserialize_from_value(value).map(Self::ToolSearchOutput),
-            Some("custom_tool_call") => deserialize_from_value(value).map(Self::CustomToolCall),
-            Some("custom_tool_call_output") => deserialize_from_value(value).map(Self::CustomToolCallOutput),
-            Some("shell_call") => deserialize_from_value(value).map(Self::ShellCall),
-            Some("shell_call_output") => deserialize_from_value(value).map(Self::ShellCallOutput),
-            Some("reasoning") => deserialize_from_value(value).map(Self::Reasoning),
-            Some("mcp_list_tools") => deserialize_from_value(value).map(Self::McpListTools),
-            Some("compaction") => deserialize_from_value(value).map(Self::Compaction),
-            Some("multi_agent_call") => deserialize_from_value(value).map(Self::MultiAgentCall),
-            Some("multi_agent_call_output") => deserialize_from_value(value).map(Self::MultiAgentCallOutput),
-            Some("agent_message") => deserialize_from_value(value).map(Self::AgentMessage),
-            Some("compaction_trigger") => Ok(Self::CompactionTrigger),
-            Some(_) => return Ok(Self::Unknown),
-        };
-        item.map_err(serde::de::Error::custom)
+        fields.insert("type".to_owned(), Value::String("message".to_owned()));
     }
+    value
+}
+
+/// Deserialize one input item, accepting the shorthand message form.
+pub(crate) fn from_value_with_default_type(value: &Value) -> Result<InputItem, serde_json::Error> {
+    serde_json::from_value(with_default_type(value.clone()))
+}
+
+/// Deserialize an item array, accepting the shorthand message form per entry.
+pub(crate) fn deserialize_items<'de, D>(deserializer: D) -> Result<Vec<InputItem>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Vec::<Value>::deserialize(deserializer)?
+        .into_iter()
+        .map(|value| serde_json::from_value(with_default_type(value)).map_err(serde::de::Error::custom))
+        .collect()
 }
 
 impl InputItem {
-    #[must_use]
-    pub(crate) fn is_unknown(&self) -> bool {
-        matches!(self, Self::Unknown)
-    }
-
     #[must_use]
     pub(crate) fn is_compaction_trigger(&self) -> bool {
         matches!(self, Self::CompactionTrigger)
@@ -398,7 +396,7 @@ impl InputItem {
 #[serde(untagged)]
 pub enum ResponsesInput {
     Text(String),
-    Items(Vec<InputItem>),
+    Items(#[serde(deserialize_with = "deserialize_items")] Vec<InputItem>),
 }
 
 impl Default for ResponsesInput {
@@ -766,12 +764,81 @@ mod tests {
             );
         }
 
-        let future: InputItem = serde_json::from_value(serde_json::json!({
+        let future = serde_json::from_value::<InputItem>(serde_json::json!({
             "type": "future_search_item",
             "payload": {"opaque": true}
+        }));
+        assert!(future.is_err(), "unmodeled input item types are rejected");
+    }
+
+    #[test]
+    fn gateway_emitted_calls_keep_their_payloads() {
+        let web_search: InputItem = serde_json::from_value(serde_json::json!({
+            "type": "web_search_call",
+            "id": "ws_1",
+            "status": "completed",
+            "action": {"type": "search", "query": "rust"}
         }))
-        .expect("unrelated future item remains forward-compatible");
-        assert!(matches!(future, InputItem::Unknown));
+        .unwrap();
+        assert!(matches!(web_search, InputItem::WebSearchCall(_)));
+        assert_eq!(
+            serde_json::to_value(&web_search).unwrap()["action"]["query"],
+            "rust",
+            "the action payload survives replay"
+        );
+
+        let mcp: InputItem = serde_json::from_value(serde_json::json!({
+            "type": "mcp_call",
+            "id": "mcp_1",
+            "server_label": "search",
+            "name": "find",
+            "arguments": "{\"q\":\"rust\"}",
+            "status": "completed",
+            "output": "found"
+        }))
+        .unwrap();
+        assert!(matches!(mcp, InputItem::McpCall(_)));
+        let value = serde_json::to_value(&mcp).unwrap();
+        assert_eq!(value["server_label"], "search");
+        assert_eq!(value["output"], "found", "the output payload survives replay");
+    }
+
+    #[test]
+    fn unmodeled_input_item_types_fail_deserialization() {
+        for kind in [
+            "computer_call",
+            "image_generation_call",
+            "file_search_call",
+            "local_shell_call",
+            "mcp_approval_response",
+        ] {
+            let error = serde_json::from_value::<InputItem>(serde_json::json!({"type": kind, "id": "x"}))
+                .expect_err("unmodeled item type");
+            assert!(error.to_string().contains(kind), "{error}");
+        }
+    }
+
+    #[test]
+    fn shorthand_messages_stay_accepted() {
+        let input: ResponsesInput =
+            serde_json::from_value(serde_json::json!([{"role": "user", "content": "hi"}])).unwrap();
+        let ResponsesInput::Items(items) = input else {
+            panic!("expected item array");
+        };
+        assert!(matches!(items[0], InputItem::Message(_)));
+
+        let tagged =
+            from_value_with_default_type(&serde_json::json!({"type": "message", "role": "user", "content": "hi"}))
+                .unwrap();
+        assert!(matches!(tagged, InputItem::Message(_)));
+
+        // An explicit discriminator is never rewritten into a message.
+        assert!(
+            from_value_with_default_type(&serde_json::json!({
+                "type": "computer_call", "role": "user", "content": "hi"
+            }))
+            .is_err()
+        );
     }
 
     #[test]
