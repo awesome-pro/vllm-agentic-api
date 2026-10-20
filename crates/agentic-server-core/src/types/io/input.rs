@@ -25,9 +25,22 @@ use super::output::{
 };
 use super::shell::{ShellCall, ShellCallOutputMessage, ShellCallStatus};
 
+/// The optional wire discriminator of a message input item.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub enum InputMessageType {
+    #[default]
+    #[serde(rename = "message")]
+    Message,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct InputMessage {
+    // InputItem's schema already supplies this discriminator. Its typed default
+    // accepts shorthand messages without accepting another item's explicit type.
+    #[serde(default, rename = "type")]
+    #[cfg_attr(feature = "openapi", schema(ignore))]
+    pub kind: InputMessageType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentAttribution>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -298,8 +311,6 @@ pub enum InputItem {
     MultiAgentCallOutput(InputMultiAgentCallOutput),
     #[serde(rename = "agent_message")]
     AgentMessage(InputAgentMessage),
-    #[serde(rename = "message")]
-    Message(InputMessage),
     /// The model's tool invocation — appears in rehydrated history so vLLM sees
     /// the full call/output pair across turns.
     #[serde(rename = "function_call")]
@@ -340,35 +351,9 @@ pub enum InputItem {
     /// A gateway-executed MCP call replayed from a prior response.
     #[serde(rename = "mcp_call")]
     McpCall(McpCall),
-}
-
-/// Fill the implicit `message` discriminator before the derived, tagged
-/// deserializer distinguishes an item's shape. Unsupported discriminators are
-/// left untouched, so they fail as unknown variants instead of becoming a
-/// message.
-fn with_default_type(mut value: Value) -> Value {
-    if let Value::Object(fields) = &mut value
-        && !fields.contains_key("type")
-    {
-        fields.insert("type".to_owned(), Value::String("message".to_owned()));
-    }
-    value
-}
-
-/// Deserialize one input item, accepting the shorthand message form.
-pub(crate) fn from_value_with_default_type(value: &Value) -> Result<InputItem, serde_json::Error> {
-    serde_json::from_value(with_default_type(value.clone()))
-}
-
-/// Deserialize an item array, accepting the shorthand message form per entry.
-pub(crate) fn deserialize_items<'de, D>(deserializer: D) -> Result<Vec<InputItem>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Vec::<Value>::deserialize(deserializer)?
-        .into_iter()
-        .map(|value| serde_json::from_value(with_default_type(value)).map_err(serde::de::Error::custom))
-        .collect()
+    /// Messages may omit their discriminator, but must not claim another item type.
+    #[serde(untagged)]
+    Message(InputMessage),
 }
 
 impl InputItem {
@@ -396,7 +381,7 @@ impl InputItem {
 #[serde(untagged)]
 pub enum ResponsesInput {
     Text(String),
-    Items(#[serde(deserialize_with = "deserialize_items")] Vec<InputItem>),
+    Items(Vec<InputItem>),
 }
 
 impl Default for ResponsesInput {
@@ -812,9 +797,10 @@ mod tests {
             "local_shell_call",
             "mcp_approval_response",
         ] {
-            let error = serde_json::from_value::<InputItem>(serde_json::json!({"type": kind, "id": "x"}))
-                .expect_err("unmodeled item type");
-            assert!(error.to_string().contains(kind), "{error}");
+            assert!(
+                serde_json::from_value::<InputItem>(serde_json::json!({"type": kind, "id": "x"})).is_err(),
+                "{kind} must be rejected"
+            );
         }
     }
 
@@ -827,18 +813,35 @@ mod tests {
         };
         assert!(matches!(items[0], InputItem::Message(_)));
 
-        let tagged =
-            from_value_with_default_type(&serde_json::json!({"type": "message", "role": "user", "content": "hi"}))
-                .unwrap();
-        assert!(matches!(tagged, InputItem::Message(_)));
+        for wire in [
+            serde_json::json!({"role": "user", "content": "hi"}),
+            serde_json::json!({"type": "message", "role": "user", "content": "hi"}),
+        ] {
+            let item: InputItem = serde_json::from_value(wire).unwrap();
+            assert!(matches!(item, InputItem::Message(_)));
+            let serialized = serde_json::to_string(&item).unwrap();
+            assert_eq!(serialized.matches("\"type\"").count(), 1);
+            assert_eq!(
+                serde_json::from_str::<Value>(&serialized).unwrap(),
+                serde_json::json!({"type": "message", "role": "user", "content": "hi"})
+            );
+        }
+    }
 
-        // An explicit discriminator is never rewritten into a message.
-        assert!(
-            from_value_with_default_type(&serde_json::json!({
-                "type": "computer_call", "role": "user", "content": "hi"
-            }))
-            .is_err()
-        );
+    #[test]
+    fn explicit_non_message_types_cannot_fall_back_to_shorthand() {
+        for kind in [
+            serde_json::json!("computer_call"),
+            serde_json::json!("function_call"),
+            serde_json::json!("web_search_call"),
+            serde_json::json!("mcp_call"),
+            Value::Null,
+            serde_json::json!(7),
+        ] {
+            let wire = serde_json::json!({"type": kind, "role": "user", "content": "hi"});
+            assert!(serde_json::from_value::<InputItem>(wire.clone()).is_err(), "{wire}");
+            assert!(serde_json::from_value::<ResponsesInput>(serde_json::json!([wire])).is_err());
+        }
     }
 
     #[test]

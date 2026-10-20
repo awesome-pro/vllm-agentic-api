@@ -133,7 +133,7 @@ impl<'de> Deserialize<'de> for ConversationItem {
         let value = Value::deserialize(deserializer)?;
         // A kind that the input union does not model may still be an output item;
         // fall back to the output union instead of rejecting it here.
-        if let Ok(input) = crate::types::io::input::from_value_with_default_type(&value) {
+        if let Ok(input) = InputItem::deserialize(&value) {
             return Ok(Self::Input(input));
         }
         let output = OutputItem::deserialize(value).map_err(serde::de::Error::custom)?;

@@ -18,7 +18,7 @@ use crate::utils::uuid7_str;
 use super::code_interpreter::CodeInterpreterCall;
 use super::input::{
     CompactionItem, InputContent, InputFunctionToolCall, InputItem, InputMessage, InputMessageContent,
-    InputTextContent, InputToolSearchCall, deserialize_non_blank_string,
+    InputMessageType, InputTextContent, InputToolSearchCall, deserialize_non_blank_string,
 };
 use super::multi_agent::{AgentAttribution, AgentMessage, MultiAgentCall, MultiAgentCallOutput};
 pub use super::reasoning::ReasoningTextContent;
@@ -172,14 +172,14 @@ impl TryFrom<&EventPayload> for OutputMessage {
 
 impl From<OutputMessage> for InputMessage {
     fn from(msg: OutputMessage) -> Self {
-        let parts = msg.content.into_iter().map(InputContent::from).collect();
         Self {
+            kind: InputMessageType::Message,
             id: Some(msg.id),
             role: msg.role,
             phase: msg.phase,
             agent: msg.agent,
             status: Some(msg.status),
-            content: InputMessageContent::Parts(parts),
+            content: InputMessageContent::Parts(msg.content.into_iter().map(InputContent::from).collect()),
         }
     }
 }
